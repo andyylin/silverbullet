@@ -12,8 +12,21 @@ import {
 import type { DecorationSet } from "@codemirror/view";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import type { NodeType } from "@lezer/common";
-import type { Client } from "../client.ts";
+import {
+  isMarkdownPath,
+  parseToRef,
+} from "@silverbulletmd/silverbullet/lib/ref";
+import {
+  isLocalURL,
+  resolveMarkdownLink,
+} from "@silverbulletmd/silverbullet/lib/resolve";
+import { resolvePath } from "@silverbulletmd/silverbullet/lib/resolve_path";
+import {
+  resolveTransclusionUrl,
+  type Transclusion,
+} from "@silverbulletmd/silverbullet/lib/transclusion";
 import { iconElement, iconSvg } from "../../plug-api/ui/icons/registry.ts";
+import type { Client } from "../client.ts";
 import {
   type DecorationBuilder,
   type IncrementalDecorations,
@@ -418,7 +431,8 @@ export type WidgetRenderMode = "ready" | "loading" | "disabled";
  *  - "ready":    render real widgets.
  *
  * The full index isn't required: on a cold client widgets render from the
- * plain file listing and converge when the index completes.
+ * plain file listing and converge when the index completes. Document embeds
+ * can render earlier; see `inlineEmbedRenderMode`.
  */
 export function widgetRenderMode(
   client: Client,
@@ -441,4 +455,90 @@ export function widgetRenderMode(
     return "loading";
   }
   return "ready";
+}
+
+/**
+ * Render mode for one `![[...]]` / `![](...)` embed.
+ *
+ * Page transclusions use `widgetRenderMode`. An image or other non-page
+ * document only needs a path, so once that path resolves it renders without
+ * waiting for the system, scripts, or a page list. A markdown link is
+ * relative to the note or absolute. A wikilink is an exact path, or a
+ * basename/suffix match against the file listing.
+ *
+ * Wiki targets are rewritten to the path they resolve to, same as a plain
+ * wiki link, so the widget that follows loads the file the listing names.
+ */
+export function inlineEmbedRenderMode(
+  client: Client,
+  state: EditorState,
+  transclusion: Transclusion,
+): WidgetRenderMode {
+  resolveTransclusionUrl(
+    transclusion,
+    client.currentPath(),
+    client.clientSystem.allKnownFiles,
+  );
+
+  const base = widgetRenderMode(client, state);
+  if (
+    base !== "loading" ||
+    isPageTransclusion(transclusion, client.currentName())
+  ) {
+    return base;
+  }
+  if (documentEmbedResolvable(transclusion, client)) {
+    return "ready";
+  }
+  return base;
+}
+
+function isPageTransclusion(t: Transclusion, pageName: string): boolean {
+  switch (t.linktype) {
+    case "markdownlink":
+      // External URLs are files (or remote images), not space pages.
+      if (!isLocalURL(t.url)) return false;
+      return resolveMarkdownLink(pageName, decodeURI(t.url))
+        .toLowerCase()
+        .endsWith(".md");
+    case "wikilink": {
+      const ref = parseToRef(t.url);
+      // A bare wiki link with no extension normalizes to a markdown page.
+      return !!ref && isMarkdownPath(ref.path);
+    }
+    default: {
+      const unreachable: never = t.linktype;
+      return unreachable;
+    }
+  }
+}
+
+/**
+ * Whether a document embed's URL can be built without the index. A miss
+ * against a loaded file listing is still resolvable: the widget shows the
+ * same missing-file error it would after the index.
+ */
+function documentEmbedResolvable(t: Transclusion, client: Client): boolean {
+  switch (t.linktype) {
+    case "markdownlink":
+      return true;
+    case "wikilink": {
+      const ref = parseToRef(t.url);
+      if (!ref || ref.path === "") return false;
+      const resolution = resolvePath(
+        ref.path,
+        client.currentPath(),
+        client.clientSystem.allKnownFiles,
+      );
+      if (resolution.exists || client.clientSystem.knownFilesLoaded) {
+        return true;
+      }
+      // Exact path. A bare basename still needs the listing.
+      return ref.path.includes("/");
+    }
+    default: {
+      const unreachable: never = t.linktype;
+      return unreachable;
+    }
+  }
 }

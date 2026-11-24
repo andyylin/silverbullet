@@ -9,7 +9,6 @@ import {
 import {
   nameFromTransclusion,
   parseTransclusion,
-  resolveTransclusionUrl,
 } from "@silverbulletmd/silverbullet/lib/transclusion";
 import type { Client } from "../../client.ts";
 import { parse } from "../../markdown_parser/parse_tree.ts";
@@ -23,6 +22,7 @@ import {
 import { transclusionEvent } from "../../space_lua/dependencies.ts";
 import {
   decoratorStateField,
+  inlineEmbedRenderMode,
   invisibleDecoration,
   isCursorInRange,
   widgetRenderMode,
@@ -36,8 +36,7 @@ export function inlineContentPlugin(client: Client) {
     (state: EditorState, _tr, range) => {
       const widgets: Range<Decoration>[] = [];
       const keys = range?.keys ?? new OccurrenceKeys();
-      const renderMode = widgetRenderMode(client, state);
-      if (renderMode === "disabled") {
+      if (widgetRenderMode(client, state) === "disabled") {
         return Decoration.set([]);
       }
 
@@ -55,11 +54,7 @@ export function inlineContentPlugin(client: Client) {
           if (!transclusion) {
             return;
           }
-          resolveTransclusionUrl(
-            transclusion,
-            client.currentPath(),
-            client.clientSystem.allKnownFiles,
-          );
+          const renderMode = inlineEmbedRenderMode(client, state, transclusion);
 
           const renderingSyntax =
             client.ui.viewState.uiOptions.markdownSyntaxRendering;
