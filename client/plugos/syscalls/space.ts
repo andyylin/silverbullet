@@ -17,19 +17,20 @@ import type {
 } from "@silverbulletmd/silverbullet/type/index";
 import type {
   FileRevisions,
-  GitSyncSnapshot,
-  GitConflicts,
   GitConflictAction,
+  GitConflicts,
+  GitSyncSnapshot,
   SpaceActivity,
   SpaceLog,
 } from "@silverbulletmd/silverbullet/type/revisions";
 import type { Client } from "../../client.ts";
-import { ServerError, serverJson } from "../../spaces/server_api.ts";
-import { fsEndpoint } from "../../spaces/constants.ts";
-import { fileChangedEvent } from "../../space_lua/dependencies.ts";
-import type { SysCallMapping } from "../system.ts";
+import { fileMetaToDocumentMeta } from "../../space.ts";
 import { lintPages, type SpaceLintDiagnostic } from "../../space_lint.ts";
 import { spaceLintDeps } from "../../space_lint_deps.ts";
+import { fileChangedEvent } from "../../space_lua/dependencies.ts";
+import { fsEndpoint } from "../../spaces/constants.ts";
+import { ServerError, serverJson } from "../../spaces/server_api.ts";
+import type { SysCallMapping } from "../system.ts";
 
 function revisionsUrl(client: Client, suffix: string): string {
   return `${client.httpSpacePrimitives.url.slice(0, -fsEndpoint.length)}/.revisions/${suffix}`;
@@ -95,6 +96,17 @@ async function resolutionIndex(client: Client): Promise<BasenameIndex> {
     (await client.space.spacePrimitives.fetchFileList()).map((f) => f.name),
   );
   return listing;
+}
+
+/**
+ * Document metadata for indexing. The file listing already carries the stat
+ * a per-file `getFileMeta` would return; reuse it until the file changes.
+ * Pages, and anything touched since the listing, still hit the server.
+ */
+function documentMeta(client: Client, name: string): Promise<DocumentMeta> {
+  const listed = client.eventedSpacePrimitives.unchangedListedFile(name);
+  if (listed) return Promise.resolve(fileMetaToDocumentMeta(listed));
+  return client.space.getDocumentMeta(name);
 }
 
 export function spaceReadSyscalls(client: Client): SysCallMapping {
@@ -244,8 +256,8 @@ export function spaceReadSyscalls(client: Client): SysCallMapping {
     },
     "space.getDocumentMeta": {
       dependsOn: (name: string) => [fileChangedEvent(name)],
-      callback: async (_ctx, name: string): Promise<DocumentMeta> =>
-        await client.space.getDocumentMeta(name),
+      callback: (_ctx, name: string): Promise<DocumentMeta> =>
+        documentMeta(client, name),
       description: "Returns metadata for a document.",
       signatures: ["space.getDocumentMeta(name)"],
     },
@@ -267,8 +279,8 @@ export function spaceReadSyscalls(client: Client): SysCallMapping {
     },
     "space.getAttachmentMeta": {
       dependsOn: (name: string) => [fileChangedEvent(name)],
-      callback: async (_ctx, name: string): Promise<DocumentMeta> =>
-        await client.space.getDocumentMeta(name),
+      callback: (_ctx, name: string): Promise<DocumentMeta> =>
+        documentMeta(client, name),
       description: "Deprecated alias for space.getDocumentMeta.",
       deprecated: "Use space.getDocumentMeta instead.",
       signatures: ["space.getAttachmentMeta(name)"],

@@ -1,5 +1,7 @@
+import type { FileMeta } from "@silverbulletmd/silverbullet/type/index";
 import { expect, test, vi } from "vitest";
 import type { Client } from "../../client.ts";
+import { fileMetaToDocumentMeta } from "../../space.ts";
 import { spaceReadSyscalls } from "./space.ts";
 
 async function activityUrl(...args: (number | undefined)[]): Promise<string> {
@@ -103,4 +105,62 @@ test("space.mergeText requires a server connection", async () => {
   await expect(syscall.callback({}, "A\n", "B\n", "C\n")).rejects.toThrow(
     "This requires a connection to the server",
   );
+});
+
+const pic: FileMeta = {
+  name: "Assets/pic.png",
+  created: 1_700_000_000_000,
+  lastModified: 1_700_000_100_000,
+  contentType: "image/png",
+  size: 5,
+  perm: "rw",
+};
+
+function metaClient(listed: FileMeta | undefined): {
+  client: Client;
+  getDocumentMeta: ReturnType<typeof vi.fn>;
+} {
+  const getDocumentMeta = vi.fn(async (name: string) =>
+    fileMetaToDocumentMeta({
+      ...pic,
+      name,
+      lastModified: pic.lastModified + 1,
+    }),
+  );
+  const client = {
+    eventedSpacePrimitives: {
+      unchangedListedFile: (name: string) =>
+        listed && name === listed.name ? listed : undefined,
+    },
+    space: { getDocumentMeta },
+  } as unknown as Client;
+  return { client, getDocumentMeta };
+}
+
+test("document metadata is reused from the file listing", async () => {
+  const { client, getDocumentMeta } = metaClient(pic);
+  const syscalls = spaceReadSyscalls(client);
+  const got = await (syscalls["space.getDocumentMeta"] as any).callback(
+    {},
+    pic.name,
+  );
+  expect(got).toEqual(fileMetaToDocumentMeta(pic));
+  expect(getDocumentMeta).not.toHaveBeenCalled();
+
+  const alias = await (syscalls["space.getAttachmentMeta"] as any).callback(
+    {},
+    pic.name,
+  );
+  expect(alias).toEqual(got);
+  expect(getDocumentMeta).not.toHaveBeenCalled();
+});
+
+test("pages and files changed since the listing still hit the server", async () => {
+  const { client, getDocumentMeta } = metaClient(pic);
+  const syscalls = spaceReadSyscalls(client);
+  await (syscalls["space.getDocumentMeta"] as any).callback({}, "Note.md");
+  await (syscalls["space.getDocumentMeta"] as any).callback({}, "other.png");
+  expect(getDocumentMeta).toHaveBeenCalledTimes(2);
+  expect(getDocumentMeta).toHaveBeenNthCalledWith(1, "Note.md");
+  expect(getDocumentMeta).toHaveBeenNthCalledWith(2, "other.png");
 });

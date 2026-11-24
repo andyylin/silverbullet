@@ -39,6 +39,11 @@ export class EventedSpacePrimitives implements SpacePrimitives {
   private spaceSnapshot: Record<string, number> = {};
   private snapshotChanged = false;
 
+  // File metadata from the last listing that dispatched events. Document
+  // indexing reads it back instead of probing each file; see
+  // `unchangedListedFile`.
+  private listedFiles = new Map<string, FileMeta>();
+
   constructor(
     private wrapped: SpacePrimitives,
     private eventHook: EventHook,
@@ -146,7 +151,9 @@ export class EventedSpacePrimitives implements SpacePrimitives {
       const deletedFiles = new Set<string>(Object.keys(this.spaceSnapshot));
       const changedFiles: ChangedFile[] = [];
       const changeEvents: Promise<unknown>[] = [];
+      const listed = new Map<string, FileMeta>();
       for (const meta of newFileList) {
+        listed.set(meta.name, meta);
         const oldHash = this.spaceSnapshot[meta.name];
         const newHash = meta.lastModified;
         this.updateInSnapshot(meta.name, newHash);
@@ -162,6 +169,9 @@ export class EventedSpacePrimitives implements SpacePrimitives {
         }
         deletedFiles.delete(meta.name);
       }
+      // Published with the snapshot update, before the events that queue
+      // indexing, so a document index can reuse this metadata.
+      this.listedFiles = listed;
       if (changedFiles.length > 0) {
         console.log(
           "Detected",
@@ -287,6 +297,19 @@ export class EventedSpacePrimitives implements SpacePrimitives {
     await this.saveSnapshot();
   }
 
+  /**
+   * Listing metadata for a document whose snapshot mtime still matches.
+   * Undefined for pages, for files absent from the last listing, and for
+   * anything that changed since — those still need `getFileMeta`.
+   */
+  unchangedListedFile(path: string): FileMeta | undefined {
+    return listedDocumentMeta(
+      path,
+      this.listedFiles.get(path),
+      this.spaceSnapshot[path],
+    );
+  }
+
   async getFileMeta(
     path: string,
     observing?: boolean,
@@ -331,4 +354,34 @@ export class EventedSpacePrimitives implements SpacePrimitives {
       this.checkDeferredFetchFileList();
     }
   }
+}
+
+/**
+ * Document metadata taken from a file listing, when that listing is still
+ * current.
+ *
+ * The listing carries the same stat `getFileMeta` would: name, size,
+ * lastModified, contentType, perm. Pages are excluded because indexing a
+ * page reads its text from the server. A snapshot mtime that no longer
+ * matches means the file changed after the listing, so the server has to
+ * be asked.
+ */
+export function listedDocumentMeta(
+  path: string,
+  listed: FileMeta | undefined,
+  snapshotMtime: number | undefined,
+): FileMeta | undefined {
+  if (path.endsWith(".md") || !listed) return undefined;
+  if (snapshotMtime !== listed.lastModified) return undefined;
+  // The same fields `getFileMeta` returns. Copying them keeps a later edit
+  // of this object from changing the cached listing, and drops anything the
+  // listing JSON carried that a metadata probe would not.
+  return {
+    name: listed.name,
+    created: listed.created,
+    lastModified: listed.lastModified,
+    contentType: listed.contentType,
+    size: listed.size,
+    perm: listed.perm,
+  };
 }

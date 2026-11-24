@@ -3,9 +3,27 @@ import { describe, expect, test } from "vitest";
 import type { DataStore } from "../data/datastore.ts";
 import type { EventHook } from "../plugos/hooks/event.ts";
 import { CheckedSpacePrimitives } from "./checked_space_primitives.ts";
-import { EventedSpacePrimitives } from "./evented_space_primitives.ts";
+import {
+  EventedSpacePrimitives,
+  listedDocumentMeta,
+} from "./evented_space_primitives.ts";
 import { FilteredSpacePrimitives } from "./filtered_space_primitives.ts";
 import type { SpacePrimitives } from "./space_primitives.ts";
+
+function doc(
+  name: string,
+  lastModified: number,
+  contentType = "image/png",
+): FileMeta {
+  return {
+    name,
+    lastModified,
+    created: 1,
+    contentType,
+    size: 4,
+    perm: "rw",
+  };
+}
 
 function meta(name: string, lastModified: number): FileMeta {
   return {
@@ -312,5 +330,79 @@ describe("EventedSpacePrimitives overlapping probes", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(listings).toBe(0);
+  });
+});
+
+test("listedDocumentMeta keeps an unchanged document and drops the rest", () => {
+  const pic = doc("a.png", 5);
+  expect(listedDocumentMeta("a.png", pic, 5)).toEqual(pic);
+  expect(
+    listedDocumentMeta("Note.md", { ...pic, name: "Note.md" }, 5),
+  ).toBeUndefined();
+  expect(listedDocumentMeta("a.png", pic, 6)).toBeUndefined();
+  expect(listedDocumentMeta("a.png", undefined, 5)).toBeUndefined();
+});
+
+describe("EventedSpacePrimitives listing metadata", () => {
+  function withList(initial: FileMeta[]): {
+    sp: EventedSpacePrimitives;
+    getFileMetaCalls: () => number;
+  } {
+    let files = initial;
+    let metaCalls = 0;
+    const { sp } = setup();
+    (sp as unknown as { wrapped: SpacePrimitives }).wrapped = {
+      fetchFileList: async () => files,
+      writeFile: async (path: string) => {
+        const current = files.find((file) => file.name === path);
+        const updated = doc(path, (current?.lastModified ?? 0) + 1);
+        files = files.map((file) => (file.name === path ? updated : file));
+        return updated;
+      },
+      deleteFile: async (path: string) => {
+        files = files.filter((file) => file.name !== path);
+      },
+      getFileMeta: async (path: string) => {
+        metaCalls++;
+        const found = files.find((file) => file.name === path);
+        if (!found) throw new Error("not found");
+        return found;
+      },
+    } as unknown as SpacePrimitives;
+    return { sp, getFileMetaCalls: () => metaCalls };
+  }
+
+  test("documents reuse the listing until the file changes or disappears", async () => {
+    const pic = doc("Assets/pic.png", 10);
+    const note = doc("Note.md", 10, "text/markdown");
+    const { sp, getFileMetaCalls } = withList([pic, note]);
+    await sp.enable();
+
+    // Events are off until enable, and nothing has been listed yet.
+    expect(sp.unchangedListedFile("Assets/pic.png")).toBeUndefined();
+
+    await sp.fetchFileList();
+    expect(sp.unchangedListedFile("Assets/pic.png")).toEqual(pic);
+    // Pages are read from the server with their text.
+    expect(sp.unchangedListedFile("Note.md")).toBeUndefined();
+    expect(getFileMetaCalls()).toBe(0);
+
+    await sp.writeFile("Assets/pic.png", new Uint8Array());
+    expect(sp.unchangedListedFile("Assets/pic.png")).toBeUndefined();
+
+    await sp.fetchFileList();
+    expect(sp.unchangedListedFile("Assets/pic.png")?.lastModified).toBe(11);
+
+    await sp.deleteFile("Assets/pic.png");
+    expect(sp.unchangedListedFile("Assets/pic.png")).toBeUndefined();
+  });
+
+  test("a listing taken before events are enabled is not reused", async () => {
+    const { sp } = withList([doc("a.png", 1)]);
+    await sp.fetchFileList();
+    expect(sp.unchangedListedFile("a.png")).toBeUndefined();
+    await sp.enable();
+    await sp.fetchFileList();
+    expect(sp.unchangedListedFile("a.png")?.lastModified).toBe(1);
   });
 });
